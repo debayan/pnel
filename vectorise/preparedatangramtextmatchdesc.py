@@ -20,20 +20,10 @@ def mean(a):
 
 postags = ["CC","CD","DT","EX","FW","IN","JJ","JJR","JJS","LS","MD","NN","NNS","NNP","NNPS","PDT","POS","PRP","PRP$","RB","RBR","RBS","RP","SYM","TO","UH","VB","VBD","VBG","VBN","VBP","VBZ","WDT","WP","WP$","WRB"]
 es = Elasticsearch(port=9200)
+es9800 = Elasticsearch(port=9800)
 
-writef = open(sys.argv[3], 'w') 
+writef = open(sys.argv[2], 'w') 
 
-def getdescription(entid):
-    res = es.search(index="wikidataentitydescriptionsindex01", body={"query":{"term":{"entityid.keyword":entid}}})
-    try:
-        if len(res['hits']['hits']) > 0:
-            description = res['hits']['hits'][0]['_source']['description']
-            return description
-        else:
-            return ''
-    except Exception as e:
-        print('getdescr error: ',e)
-        return ''
 cache = {}
 
 def gettextembedding(text):
@@ -51,13 +41,12 @@ def gettextembedding(text):
     return [0]*300
 
 def getembedding(enturl):
-    entityurl = '<http://www.wikidata.org/entity/'+enturl[37:]+'>'
-    res = es.search(index="wikidataembedsindex01", body={"query":{"term":{"key":{"value":entityurl}}}})
+    res = es.search(index="freebaseembedindex01", body={"query":{"term":{"key":{"value":enturl}}}})
     try:
-        embedding = [float(x) for x in res['hits']['hits'][0]['_source']['embedding']]
+        embedding = res['hits']['hits'][0]['_source']['embedding']
         return embedding
     except Exception as e:
-        print(enturl,' not found')
+        #print(enturl,' not found')
         return None
     return None
 
@@ -68,11 +57,13 @@ fail = 0
 def givewordvectors(inputtuple):#(id,question,entities):
     id = inputtuple[0]
     question = inputtuple[1]
-    entities = inputtuple[2]
+    entities = [x.replace('ns:','') for x in inputtuple[2]]
+    relations = [x.replace('ns:','') for x in inputtuple[3]]
     if not question:
         return []
-    q = question
+    q = question.replace('"','')
     q = re.sub("\s*\?", "", q.strip())
+    print(q)
     pos = TextBlob(q)
     chunks = pos.tags
     candidatevectors = []
@@ -84,92 +75,85 @@ def givewordvectors(inputtuple):#(id,question,entities):
     questionembedding = list(map(lambda x: sum(x)/len(x), zip(*questionembeddings)))
     true = []
     false = []
+    found = set()
     for idx,chunk in enumerate(chunks):
         #n
         word = chunk[0]
         tokenembedding = questionembeddings[idx]
         posonehot = len(postags)*[0.0]
         posonehot[postags.index(chunk[1])] = 1
-        esresult = es.search(index="wikidataentitylabelindex01", body={"query":{"multi_match":{"query":chunks[idx][0]}},"size":30})
+        esresult = es9800.search(index="freebaseentitylabelindex01", body={"query":{"multi_match":{"query":chunks[idx][0]}},"size":50})
         esresults = esresult['hits']['hits']
         if len(esresults) > 0:
             for entidx,esresult in enumerate(esresults):
                 entityembedding = getembedding(esresult['_source']['uri'])
-                desc = getdescription(esresult['_source']['uri'][37:])
-                descembedding = gettextembedding(desc)
-                label = esresult['_source']['wikidataLabel']
+                label = esresult['_source']['freebaseLabel']
+                descembedding = gettextembedding(label)
                 textmatchmetric = gettextmatchmetric(label, word)
+                if not all(x>0.5 for x in textmatchmetric):
+                    continue
                 if entityembedding and questionembedding :
-                    if esresult['_source']['uri'][37:] in entities:
-                        candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,1],esresult['_source']['uri'][37:],1.0])
+                    if esresult['_source']['uri'] in entities:
+                        found.add(esresult['_source']['uri'])
+                        candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,1],esresult['_source']['uri'],1.0])
                     else:
-                        candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,1],esresult['_source']['uri'][37:],0.0])
-        #n-1,n
-        if idx > 0:
-             word = chunks[idx-1][0]+' '+chunks[idx][0]
-             esresult = es.search(index="wikidataentitylabelindex01", body={"query":{"multi_match":{"query":word}},"size":30})
-             esresults = esresult['hits']['hits']
-             if len(esresults) > 0:
-                 for entidx,esresult in enumerate(esresults):
-                     entityembedding = getembedding(esresult['_source']['uri'])
-                     label = esresult['_source']['wikidataLabel']
-                     desc = getdescription(esresult['_source']['uri'][37:])
-                     descembedding = gettextembedding(desc)
-                     textmatchmetric = gettextmatchmetric(label, word)
-                     if entityembedding and questionembedding :
-                         if esresult['_source']['uri'][37:] in entities:
-                             candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,-2],esresult['_source']['uri'][37:],1.0])
-                         else:
-                             candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,-2],esresult['_source']['uri'][37:],0.0])
+                        candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,1],esresult['_source']['uri'],0.0])
         #n,n+1
         if idx < len(chunks) - 1:
             word = chunks[idx][0]+' '+chunks[idx+1][0]
-            esresult = es.search(index="wikidataentitylabelindex01", body={"query":{"multi_match":{"query":word}},"size":30})
+            esresult = es9800.search(index="freebaseentitylabelindex01", body={"query":{"multi_match":{"query":word}},"size":50})
             esresults = esresult['hits']['hits']
             if len(esresults) > 0:
                 for entidx,esresult in enumerate(esresults):
                     entityembedding = getembedding(esresult['_source']['uri'])
-                    label = esresult['_source']['wikidataLabel']
-                    desc = getdescription(esresult['_source']['uri'][37:])
-                    descembedding = gettextembedding(desc)
+                    label = esresult['_source']['freebaseLabel']
+                    descembedding = gettextembedding(label)
                     textmatchmetric = gettextmatchmetric(label, word)
+                    if not all(x>0.5 for x in textmatchmetric):
+                        continue
                     if entityembedding and questionembedding :
-                        if esresult['_source']['uri'][37:] in entities:
-                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,2],esresult['_source']['uri'][37:],1.0])
+                        if esresult['_source']['uri'] in entities:
+                            found.add(esresult['_source']['uri'])
+                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,2],esresult['_source']['uri'],1.0])
                         else:
-                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,2],esresult['_source']['uri'][37:],0.0])
-        #n-1,n,n+1
-        if idx < len(chunks) - 1 and idx > 0:
-            word = chunks[idx-1][0]+' '+chunks[idx][0]+' '+chunks[idx+1][0]
-            esresult = es.search(index="wikidataentitylabelindex01", body={"query":{"multi_match":{"query":word}},"size":30})
+                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,2],esresult['_source']['uri'],0.0])
+        #n,n+1,n+2
+        if idx < len(chunks) - 2:
+            word = chunks[idx][0]+' '+chunks[idx+1][0]+' '+chunks[idx+2][0]
+            esresult = es9800.search(index="freebaseentitylabelindex01", body={"query":{"multi_match":{"query":word}},"size":50})
             esresults = esresult['hits']['hits']
             if len(esresults) > 0:
                 for entidx,esresult in enumerate(esresults):
                     entityembedding = getembedding(esresult['_source']['uri'])
-                    label = esresult['_source']['wikidataLabel']
-                    desc = getdescription(esresult['_source']['uri'][37:])
-                    descembedding = gettextembedding(desc)
+                    label = esresult['_source']['freebaseLabel']
+                    descembedding = gettextembedding(label)
                     textmatchmetric = gettextmatchmetric(label, word)
+                    if not all(x>0.5 for x in textmatchmetric):
+                        continue
                     if entityembedding and questionembedding :
-                        if esresult['_source']['uri'][37:] in entities:
-                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,3],esresult['_source']['uri'][37:],1.0])
+                        if esresult['_source']['uri'] in entities:
+                            found.add(esresult['_source']['uri'])
+                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,3],esresult['_source']['uri'],1.0])
                         else:
-                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,3],esresult['_source']['uri'][37:],0.0])
-    print("len ",len(candidatevectors[0][0])) 
-    writef.write(json.dumps([id,item['entities'],candidatevectors])+'\n')
-    return (id,entities,candidatevectors)
+                            candidatevectors.append([questionembedding+tokenembedding+entityembedding+descembedding+posonehot+textmatchmetric+[entidx,idx,3],esresult['_source']['uri'],0.0])
+    writef.write(json.dumps([id,item['entities'],item['relations'],candidatevectors])+'\n')
+    return (id,entities,candidatevectors,found)
 
 d = json.loads(open(sys.argv[1]).read())
-random.shuffle(d)
+#random.shuffle(d)
 labelledcandidates = []
 inputcandidates = []
+totalents = 0
+totalfound = 0
 for idx,item in enumerate(d):
-    if item['source'] != sys.argv[2]:
-        continue
     print(idx,item['question'])
-    inputcandidates.append((item['id'],item['question'],item['entities']))
-    candidatevectors = givewordvectors((item['id'],item['question'],item['entities']))
-    print(len(candidatevectors))
+    inputcandidates.append((item['ID'],item['question'],item['entities'],item['relations']))
+    candidatevectors = givewordvectors((item['ID'],item['question'],item['entities'],item['relations']))
+    totalents += len(set(item['entities']))
+    totalfound += len(candidatevectors[3])
+    print("candveclen: ",len(candidatevectors[2]))
+    print("gold ents: ",totalents)
+    print("foundents: ",totalfound)
 #pool = Pool(10)
 #responses = pool.imap(givewordvectors,inputcandidates)
 #count = 0
