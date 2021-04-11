@@ -8,8 +8,8 @@ import sys
 import json
 import glob
 
-tf.app.flags.DEFINE_integer("batch_size", 3,"Batch size.")
-tf.app.flags.DEFINE_integer("max_input_sequence_len", 3000, "Maximum input sequence length.")
+tf.app.flags.DEFINE_integer("batch_size", 5,"Batch size.")
+tf.app.flags.DEFINE_integer("max_input_sequence_len", 22000, "Maximum input sequence length.")
 tf.app.flags.DEFINE_integer("max_output_sequence_len", 100, "Maximum output sequence length.")
 tf.app.flags.DEFINE_integer("rnn_size", 512, "RNN unit size.")
 tf.app.flags.DEFINE_integer("attention_size", 128, "Attention size.")
@@ -21,8 +21,8 @@ tf.app.flags.DEFINE_boolean("forward_only", False, "Forward Only.")
 tf.app.flags.DEFINE_string("models_dir", "", "Log directory")
 tf.app.flags.DEFINE_string("data_path", "", "Training Data path.")
 tf.app.flags.DEFINE_string("test_data_path", "", "Test Data path.")
-tf.app.flags.DEFINE_integer("steps_per_checkpoint", 100, "frequence to do per checkpoint.")
-tf.app.flags.DEFINE_integer("epoch_limit", 10, "stop after these many epochs")
+tf.app.flags.DEFINE_integer("steps_per_checkpoint",50, "frequence to do per checkpoint.")
+tf.app.flags.DEFINE_integer("epoch_limit", 5, "stop after these many epochs")
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -41,7 +41,7 @@ class EntityLinker(object):
     with self.testgraph.as_default():
       config = tf.ConfigProto()
       config.gpu_options.allow_growth = True
-      config.operation_timeout_in_ms=6000
+      config.operation_timeout_in_ms=60000
       self.testsess = tf.Session(config=config)
     #self.read_test_data()
     testlinecount = 0
@@ -51,8 +51,9 @@ class EntityLinker(object):
         testlinecount += 1
     print(testlinecount, " lines in test file")
     random.seed(1)
-    self.randomtestlinenumbers = random.sample(range(1,testlinecount-1),100)
+    self.randomtestlinenumbers = random.sample(range(1,testlinecount-1),5)
     print("Will test the following line numbers: ",self.randomtestlinenumbers)
+    self.relvecs = json.loads(open('/raid/banerjee/freebasepnelvectors/fbrelvecs.txt').read())
 
 
   def read_data(self, step):
@@ -76,15 +77,25 @@ class EntityLinker(object):
             continue
         questioninputs = []
         questionoutputs = []
-        for idx,word in enumerate(question[2]):
+        for idx,word in enumerate(question[3]):
+#          print("word[0]:",word[0],len(word[0]))
+#          print("word[1]:",word[1],len(word[1]))
+#          print("word[2]:",word[2])
+#          sys.exit(1)
           questioninputs.append(word[0])
           if word[2] == 1.0:
             questionoutputs.append(idx+1)
-        enc_input_len = len(question[2]) 
+        for idx,word in enumerate(self.relvecs):
+          questioninputs.append(word[0])
+          if 'ns:'+word[1] in question[2]:
+        #    print(word[1],question[2])
+            questionoutputs.append(len(question[3])+idx+1)
+        enc_input_len = len(questioninputs)
+        #print("encinputlen: ",enc_input_len)
         if enc_input_len > FLAGS.max_input_sequence_len:
           continue
         for i in range(FLAGS.max_input_sequence_len-enc_input_len):
-          questioninputs.append([0]*1142)
+          questioninputs.append([0]*992)
         weight = np.zeros(FLAGS.max_input_sequence_len)
         weight[:enc_input_len]=1
         enc_input_weights.append(weight)
@@ -101,6 +112,8 @@ class EntityLinker(object):
         weight = np.zeros(FLAGS.max_output_sequence_len)
         weight[:dec_input_len]=1
         dec_input_weights.append(weight)
+        if len(inputs) == FLAGS.batch_size:
+          break
     if len(inputs) < FLAGS.batch_size:
       return False
 
@@ -128,7 +141,7 @@ class EntityLinker(object):
 
   def build_model(self):
     with self.testgraph.as_default():
-      self.testmodel = pointer_net.PointerNet(batch_size=1,
+      self.testmodel = pointer_net.PointerNet(batch_size=5,
                     max_input_sequence_len=FLAGS.max_input_sequence_len,
                     max_output_sequence_len=FLAGS.max_output_sequence_len,
                     rnn_size=FLAGS.rnn_size,
@@ -223,20 +236,22 @@ class EntityLinker(object):
     self.testoutputs = []
     for question in d:
       questioninputs = []
-      enc_input_len = len(question[2])
+      enc_input_len = len(question[3])+len(self.relvecs)
       #print(enc_input_len)
       if enc_input_len > FLAGS.max_input_sequence_len:
         print("Length too long, skip")
         continue
-      for idx,word in enumerate(question[2]):
+      for idx,word in enumerate(question[3]):
+        questioninputs.append(word[0])
+      for idx,word in enumerate(self.relvecs):
         questioninputs.append(word[0])
       for i in range(FLAGS.max_input_sequence_len-enc_input_len):
-        questioninputs.append([0]*1142)
-    self.testoutputs.append(question[1])
-    weight = np.zeros(FLAGS.max_input_sequence_len)
-    weight[:enc_input_len]=1
-    enc_input_weights.append(weight)
-    inputs.append(questioninputs)
+        questioninputs.append([0]*992)
+      self.testoutputs.append(question[1]+question[2])
+      weight = np.zeros(FLAGS.max_input_sequence_len)
+      weight[:enc_input_len]=1
+      enc_input_weights.append(weight)
+      inputs.append(questioninputs)
     self.test_inputs = np.stack(inputs)
     self.test_enc_input_weights = np.stack(enc_input_weights)
 
@@ -244,12 +259,15 @@ class EntityLinker(object):
     for inputquestion,prediction,groundtruth in zip(batchd, predictions, self.testoutputs):
       idtoentity = {}
       predents = set()
-      gtents = groundtruth
+      gtents = [x.replace('ns:','') for x in groundtruth]
       #print(len(self.test_inputs))
+      tot = inputquestion[3]+self.relvecs
       for entnum in list(prediction[0]):
         if entnum <= 0:
           continue
-        predents.add(inputquestion[2][entnum-1][1])
+        predents.add(tot[entnum-1][1])
+      predents = [x.replace('ns:','') for x in predents]
+      gtents = [x.replace('ns:','') for x in gtents]
       print(gtents,predents)
       for goldentity in gtents:
         #totalentchunks += 1
@@ -292,24 +310,29 @@ class EntityLinker(object):
           continue
         line = line.strip()
         d = json.loads(line)
-        if len(d) > FLAGS.max_input_sequence_len:
+        if len(d[3]) > FLAGS.max_input_sequence_len:
           print("Skip question, too long")
           continue
   #      #print(len(d))
         batchd.append(d)
+        if len(batchd) < 5:
+            continue
         #print(linecount)
         try:
+          print("lenbatchd: ",len(batchd))
           self.getvector(batchd)
+          print("inpshape: ",self.test_inputs.shape)
           predicted,_ = self.testmodel.step(self.testsess, self.test_inputs, self.test_enc_input_weights, update=False)
+          print("predshape: ",predicted.shape)
           _tp,_fp,_fn = self.calculatef1(batchd,predicted,tp,fp,fn)
           batchd = []
         except Exception as e:
-          #print(e)
+          print(e)
           batchd = []
           continue
-        tp = _tp
-        fp = _fp
-        fn = _fn
+        tp += _tp
+        fp += _fp
+        fn += _fn
     precisionentity = tp/float(tp+fp+0.001)
     recallentity = tp/float(tp+fn+0.001)
     f1entity = 2*(precisionentity*recallentity)/(precisionentity+recallentity+0.001)
