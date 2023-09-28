@@ -152,5 +152,6 @@ $ curl -XPOST 'ltdemos.informatik.uni-hamburg.de/pnel/processQuery' -H 'Content-
 	    publisher="Springer International Publishing",
 	    pages="21--38"
     }
-
+## License
+The code is released under the MIT license.
 
